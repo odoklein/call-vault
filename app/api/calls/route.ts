@@ -4,12 +4,18 @@ import { validateApiKey } from "@/lib/api-keys";
 import { contentScore, phoneMatches, phoneVariants } from "@/lib/phone-match";
 import { getRecordingUrl } from "@/lib/storage";
 
+const DEFAULT_LIMIT = 1;
+const MAX_LIMIT = 50;
+
 /**
- * GET /api/calls?phone=+336...&windowStart=ISO&windowEnd=ISO
+ * GET /api/calls?phone=+336...&phone=+337...&windowStart=ISO&windowEnd=ISO&limit=1
  *
  * The CRM's replacement for calling WithAllo/Leexi/etc. directly. Runs entirely against already-
- * synced rows — no outbound provider call, so this endpoint can never 429. Used for the manual
- * "which call was it" picker and any on-demand backfill lookup.
+ * synced rows — no outbound provider call, so this endpoint can never 429. `phone` may repeat
+ * (several distinct candidate numbers per action — meetingPhone/contact/company — not format
+ * variants of one number, that's handled internally by phoneVariants()). `limit` (default 1, max
+ * 50) controls how many ranked candidates come back: 1 for the automatic best-match enrichment
+ * path, higher for the manual "which call was it" picker.
  */
 export async function GET(req: NextRequest) {
   const auth = await validateApiKey(req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null, "/api/calls");
@@ -18,12 +24,13 @@ export async function GET(req: NextRequest) {
   }
 
   const { searchParams } = new URL(req.url);
-  const phone = searchParams.get("phone");
+  const phones = searchParams.getAll("phone").filter(Boolean);
   const windowStart = searchParams.get("windowStart");
   const windowEnd = searchParams.get("windowEnd");
+  const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(searchParams.get("limit") ?? String(DEFAULT_LIMIT), 10) || DEFAULT_LIMIT));
 
-  if (!phone || !windowStart || !windowEnd) {
-    return NextResponse.json({ error: "phone, windowStart and windowEnd are required" }, { status: 400 });
+  if (phones.length === 0 || !windowStart || !windowEnd) {
+    return NextResponse.json({ error: "at least one phone, plus windowStart and windowEnd, are required" }, { status: 400 });
   }
 
   const start = new Date(windowStart);
@@ -32,7 +39,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "windowStart/windowEnd must be valid ISO dates" }, { status: 400 });
   }
 
-  const variants = phoneVariants(phone);
+  const variants = phones.flatMap(phoneVariants);
 
   const candidates = await prisma.call.findMany({
     where: { startedAt: { gte: start, lte: end } },
@@ -41,23 +48,23 @@ export async function GET(req: NextRequest) {
   });
 
   const matches = candidates.filter((c) => phoneMatches(c.fromNumber, variants) || phoneMatches(c.toNumber, variants));
-
-  if (matches.length === 0) {
-    return NextResponse.json({ match: null, candidatesExamined: candidates.length });
-  }
-
   matches.sort((a, b) => contentScore(b) - contentScore(a));
-  const best = matches[0]!;
 
-  return NextResponse.json({
-    match: {
-      callId: best.id,
-      summary: best.aiSummary,
-      transcription: best.transcription,
-      recordingUrl: best.recordingKey ? await getRecordingUrl(best.recordingKey) : null,
-      startedAt: best.startedAt,
-      durationSec: best.durationSec,
-    },
-    otherCandidates: matches.length - 1,
-  });
+  const top = matches.slice(0, limit);
+  const results = await Promise.all(
+    top.map(async (call) => ({
+      callId: call.id,
+      fromNumber: call.fromNumber,
+      toNumber: call.toNumber,
+      direction: call.direction,
+      status: call.status,
+      durationSec: call.durationSec,
+      startedAt: call.startedAt,
+      summary: call.aiSummary,
+      transcription: call.transcription,
+      recordingUrl: call.recordingKey ? await getRecordingUrl(call.recordingKey) : null,
+    })),
+  );
+
+  return NextResponse.json({ matches: results, candidatesExamined: candidates.length, totalMatches: matches.length });
 }
