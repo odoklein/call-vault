@@ -10,6 +10,7 @@ import { REDIS_CONFIG, checkRedisOnce, isRedisAvailable } from "./redis";
 import { prisma } from "../db";
 import { alloProvider } from "../providers/allo/sync";
 import { mirrorRecording } from "../audio/mirror-recording";
+import { getRecordingAuthHeaders } from "../providers/recording-auth";
 import { canExecute, recordFailure, recordSuccess } from "../circuit-breaker";
 
 // BullMQ rejects colons in queue names outright — keep this alphanumeric/hyphen only.
@@ -119,6 +120,7 @@ export function createAlloSyncWorker(): Worker<AlloSyncJobData> {
               recordingUrl: call.recordingUrl,
               providerSlug: "allo",
               callId: savedCall.id,
+              headers: getRecordingAuthHeaders("allo"),
             });
             await prisma.call.update({
               where: { id: savedCall.id },

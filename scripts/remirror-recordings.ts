@@ -16,6 +16,7 @@ import "dotenv/config";
 import { RecordingStatus } from "@prisma/client";
 import { prisma } from "../lib/db";
 import { mirrorRecording } from "../lib/audio/mirror-recording";
+import { getRecordingAuthHeaders } from "../lib/providers/recording-auth";
 
 function extractRecordingUrl(rawPayload: unknown): string | null {
   if (!rawPayload || typeof rawPayload !== "object") return null;
@@ -57,7 +58,12 @@ async function main() {
       continue;
     }
 
-    const mirrored = await mirrorRecording({ recordingUrl, providerSlug: call.provider.slug, callId: call.id });
+    const mirrored = await mirrorRecording({
+      recordingUrl,
+      providerSlug: call.provider.slug,
+      callId: call.id,
+      headers: getRecordingAuthHeaders(call.provider.slug),
+    });
     if (mirrored) {
       await prisma.call.update({
         where: { id: call.id },
