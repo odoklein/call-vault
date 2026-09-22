@@ -12,6 +12,7 @@
     "prisma:migrate": "prisma migrate dev",
     "seed:providers": "tsx scripts/seed-providers.ts",
     "remirror-recordings": "tsx scripts/remirror-recordings.ts",
+    "mint-api-key": "tsx scripts/mint-api-key.ts",
     "test:phone-match": "tsx --test lib/phone-match.test.ts"
   },
   "dependencies": {
