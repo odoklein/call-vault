@@ -2,9 +2,9 @@
 
 A provider-agnostic call/audio storage service for `captainprospect-crm`. It owns every telephony
 provider connection (WithAllo today; Leexi, Twilio, Aircall, Ringover as adapters land), stores
-calls and recordings in its own Postgres + S3, and gives the CRM one stable, internal endpoint to
-read from — so the CRM itself never talks to a provider, and can never surface a provider's
-`429`/timeout as "request failed" again.
+calls and recordings in its own Postgres + object storage (S3 or a self-hosted MinIO bucket), and
+gives the CRM one stable, internal endpoint to read from — so the CRM itself never talks to a
+provider, and can never surface a provider's `429`/timeout as "request failed" again.
 
 Full design/rollout plan: see the plan this was built from (schema rationale, why a separate DB,
 why BullMQ, matching strategy per provider, phased rollout P0–P5).
@@ -44,9 +44,13 @@ Check `http://localhost:5100/api/health` for a DB+Redis liveness probe.
 - Syncs every active Allo `Line` on a cron (`ALLO_SYNC_CRON`, default every 2 minutes),
   **incrementally** — each run only walks pages newer than `SyncCursor.lastSyncedAt`, not a full
   rescan. This alone removes most of the 429 pressure the old per-action heuristic search caused.
-- Mirrors each call's recording to storage (local disk in dev, S3 in production via
-  `STORAGE_PROVIDER=s3`) exactly once; WithAllo's own media URL is never referenced again after
-  that.
+- Mirrors each call's recording to storage exactly once — local disk in dev, or in production
+  either AWS S3 (`STORAGE_PROVIDER=s3`) or a self-hosted MinIO bucket (`STORAGE_PROVIDER=minio`,
+  same `MINIO_*` env var names as captainprospect-crm's `lib/storage/minio.ts`). WithAllo's own
+  media URL is never referenced again after that.
+  **If staying on `STORAGE_PROVIDER=local`, that path must sit on a persistent volume** — a plain
+  container filesystem is wiped on every redeploy, silently losing every recording synced since
+  the last one.
 - Exposes `GET /api/calls?phone=&windowStart=&windowEnd=` (Bearer-auth'd with a vault `ApiKey`) —
   the phone+time-window heuristic match, but now a plain DB query instead of a live paginated
   provider scan. This is what the CRM should call instead of `AlloProvider.fetchMatchingCallRecord`.

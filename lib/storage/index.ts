@@ -1,7 +1,6 @@
 // File storage abstraction — same shape as captainprospect-crm's lib/storage/storage-service.ts
-// (StorageProvider.upload/download/delete), trimmed to what the vault needs (no Minio variant).
-// Recordings are fetched from the provider exactly once and pushed through here; after that, only
-// this store is ever read from.
+// (StorageProvider.upload/download/delete). Recordings are fetched from the provider exactly once
+// and pushed through here; after that, only this store is ever read from.
 
 import { existsSync, mkdirSync } from "fs";
 import { mkdir, readFile, unlink, writeFile } from "fs/promises";
@@ -101,6 +100,53 @@ async function streamToBuffer(stream: GetObjectCommandOutput["Body"]): Promise<B
 }
 
 // ============================================
+// MINIO (self-hosted S3-compatible — same env var names as captainprospect-crm's
+// lib/storage/minio.ts, so Odo doesn't have to learn a second naming scheme)
+// ============================================
+
+class MinioStorageProvider implements StorageProvider {
+  private client: S3Client;
+  private bucket: string;
+  private endpoint: string;
+
+  constructor() {
+    this.bucket = process.env.MINIO_BUCKET || "call-vault";
+    this.endpoint = (process.env.MINIO_ENDPOINT || "").replace(/\/+$/, "");
+    this.client = new S3Client({
+      endpoint: this.endpoint,
+      region: process.env.MINIO_REGION || "us-east-1",
+      // MinIO is not virtual-hosted-style like AWS S3 — bucket must be in the path, not the host.
+      forcePathStyle: true,
+      credentials: {
+        accessKeyId: process.env.MINIO_ACCESS_KEY_ID || "",
+        secretAccessKey: process.env.MINIO_SECRET_ACCESS_KEY || "",
+      },
+    });
+  }
+
+  async upload(file: Buffer, key: string, mimeType: string): Promise<string> {
+    await this.client.send(
+      new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: file, ContentType: mimeType }),
+    );
+    const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+    return `${this.endpoint}/${encodeURIComponent(this.bucket)}/${encodedKey}`;
+  }
+
+  async download(key: string): Promise<Buffer> {
+    const response = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+    return streamToBuffer(response.Body);
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+  }
+
+  async getSignedUrl(key: string, expiresIn = 3600): Promise<string> {
+    return getS3SignedUrl(this.client, new GetObjectCommand({ Bucket: this.bucket, Key: key }), { expiresIn });
+  }
+}
+
+// ============================================
 // SINGLETON, provider chosen by STORAGE_PROVIDER
 // ============================================
 
@@ -108,13 +154,14 @@ let provider: StorageProvider | null = null;
 
 export function getStorageProvider(): StorageProvider {
   if (provider) return provider;
-  provider = process.env.STORAGE_PROVIDER === "s3" ? new S3StorageProvider() : new LocalStorageProvider();
+  const kind = process.env.STORAGE_PROVIDER;
+  provider = kind === "minio" ? new MinioStorageProvider() : kind === "s3" ? new S3StorageProvider() : new LocalStorageProvider();
   return provider;
 }
 
 /** Signed URL for a stored recording. Falls back to a plain path for local dev storage. */
 export async function getRecordingUrl(key: string): Promise<string> {
   const p = getStorageProvider();
-  if (p instanceof S3StorageProvider) return p.getSignedUrl(key);
+  if (p instanceof S3StorageProvider || p instanceof MinioStorageProvider) return p.getSignedUrl(key);
   return `/uploads/${key}`;
 }
