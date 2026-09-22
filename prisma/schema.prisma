@@ -1,0 +1,181 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// PROVIDERS & LINES
+// ============================================
+
+enum CallDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum RecordingStatus {
+  NONE // provider had no recording
+  PENDING // call seen, recording not fetched/mirrored yet
+  STORED // mirrored to our own storage — recordingKey is authoritative
+  FAILED // fetch/upload failed; retry via the worker
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+/// One row per telephony/call-intelligence provider (allo, leexi, twilio, aircall, ringover, ...).
+/// Adding a provider is a new row + a new adapter under lib/providers/<slug>/ — nothing else in
+/// the schema changes.
+model Provider {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  displayName String
+  /// Provider-specific settings that aren't secrets (secrets stay in env vars).
+  config      Json     @default("{}")
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  lines       Line[]
+  calls       Call[]
+  syncCursors SyncCursor[]
+
+  @@index([isActive])
+}
+
+/// A phone line / number known to a provider. For poll-based providers (Allo, Leexi) this is what
+/// gets synced on a schedule. For click-to-dial providers (Twilio, Aircall, Ringover) this is the
+/// caller-id used when initiating a call.
+model Line {
+  id             String   @id @default(cuid())
+  providerId     String
+  provider       Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  externalNumber String
+  label          String?
+  /// Free-form pointer back to the CRM (a User id or email) — never a real FK, the two apps
+  /// have separate databases on purpose (see plan: "Why a separate DB").
+  crmOwnerRef    String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  syncCursors SyncCursor[]
+
+  @@unique([providerId, externalNumber])
+  @@index([isActive])
+}
+
+/// Per (provider, line) incremental sync watermark. Poll-based adapters read this before fetching
+/// so a sync run only walks pages newer than what's already stored — this is the main lever that
+/// removes 429 pressure vs. today's "rescan up to MAX_PAGES every time" design.
+model SyncCursor {
+  id           String    @id @default(cuid())
+  providerId   String
+  provider     Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  lineId       String
+  line         Line      @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  /// Newest call start time already stored for this line.
+  lastSyncedAt DateTime?
+  lastSyncAt   DateTime? // wall-clock time of the last successful run (for staleness alerts)
+  lastError    String?
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([providerId, lineId])
+}
+
+// ============================================
+// CALLS
+// ============================================
+
+/// The vault's own record of a call, provider-agnostic. This is what the CRM ultimately reads —
+/// directly (never), always through /api/calls or the call-ready webhook.
+model Call {
+  id             String        @id @default(cuid())
+  providerId     String
+  provider       Provider      @relation(fields: [providerId], references: [id])
+  providerCallId String
+  direction      CallDirection @default(OUTBOUND)
+  fromNumber     String
+  toNumber       String
+  /// Provider's raw status/outcome string (kept as-is, not modeled as an enum — every provider
+  /// has a different vocabulary).
+  status         String?
+  startedAt      DateTime?
+  endedAt        DateTime?
+  durationSec    Int           @default(0)
+
+  /// Our own storage key (S3 or local). Provider media URLs are fetched exactly once and never
+  /// referenced again once recordingStatus = STORED.
+  recordingKey    String?
+  recordingStatus RecordingStatus @default(NONE)
+  transcription   String?         @db.Text
+  aiSummary       String?         @db.Text
+  aiExtraction    Json?
+  /// Full provider payload, kept for debugging / re-processing without another API call.
+  rawPayload      Json
+
+  /// Best-effort heuristic match info (used for Allo/Leexi, which can't tag a dial with a CRM id).
+  matchedCrmContactPhone String?
+  matchedCrmActionId     String?
+
+  consentAnnounced Boolean   @default(false)
+  purgeAfter       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  webhookDeliveries WebhookDelivery[]
+
+  @@unique([providerId, providerCallId])
+  @@index([fromNumber])
+  @@index([toNumber])
+  @@index([startedAt])
+  @@index([matchedCrmActionId])
+}
+
+/// Outbound delivery ledger, vault -> CRM. Turns "the fiche didn't update" from a silent miss into
+/// a visible, retryable row.
+model WebhookDelivery {
+  id            String                @id @default(cuid())
+  callId        String
+  call          Call                  @relation(fields: [callId], references: [id], onDelete: Cascade)
+  targetUrl     String
+  status        WebhookDeliveryStatus @default(PENDING)
+  attempt       Int                   @default(0)
+  lastError     String?
+  nextAttemptAt DateTime?
+  deliveredAt   DateTime?
+  createdAt     DateTime              @default(now())
+
+  @@index([status])
+  @@index([callId])
+}
+
+// ============================================
+// AUTH (CRM <-> vault, both directions)
+// ============================================
+
+/// Same shape as the CRM's ApiKey model (lib/api-keys.ts / prisma/schema.prisma), without the
+/// CRM-specific Client/Mission/UserRole scoping — this app has no such concepts.
+model ApiKey {
+  id                 String    @id @default(cuid())
+  name               String
+  keyHash            String    @unique
+  keyPrefix          String
+  allowedEndpoints   Json      @default("[]")
+  rateLimitPerMinute Int       @default(60)
+  rateLimitPerHour   Int       @default(1000)
+  isActive           Boolean   @default(true)
+  lastUsedAt         DateTime?
+  expiresAt          DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([keyHash])
+  @@index([isActive])
+}

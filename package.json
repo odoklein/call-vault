@@ -1,0 +1,40 @@
+{
+  "name": "call-vault",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 5100",
+    "build": "prisma generate && next build",
+    "start": "next start -p 5100",
+    "lint": "eslint",
+    "worker": "tsx worker.ts",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "seed:providers": "tsx scripts/seed-providers.ts",
+    "test:phone-match": "tsx --test lib/phone-match.test.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.968.0",
+    "@aws-sdk/s3-request-presigner": "^3.968.0",
+    "@prisma/client": "^6.19.1",
+    "bullmq": "^5.66.5",
+    "dotenv": "^17.2.3",
+    "ioredis": "^5.9.2",
+    "next": "16.1.1",
+    "prisma": "^6.19.1",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "dotenv-cli": "^11.0.0",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5"
+  }
+}
