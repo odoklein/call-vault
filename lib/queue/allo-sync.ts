@@ -12,7 +12,8 @@ import { alloProvider } from "../providers/allo/sync";
 import { mirrorRecording } from "../audio/mirror-recording";
 import { canExecute, recordFailure, recordSuccess } from "../circuit-breaker";
 
-const QUEUE_NAME = "vault:allo-sync";
+// BullMQ rejects colons in queue names outright — keep this alphanumeric/hyphen only.
+const QUEUE_NAME = "vault-allo-sync";
 const MAX_PAGES = Math.max(1, parseInt(process.env.ALLO_SYNC_MAX_PAGES ?? "20", 10));
 
 interface AlloSyncJobData {
