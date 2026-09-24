@@ -41,8 +41,14 @@ export async function GET(req: NextRequest) {
 
   const variants = phones.flatMap(phoneVariants);
 
+  // Narrow by number in SQL. With the time window alone, `take: 200` only covered the newest
+  // 200 calls across every line (about a day of team traffic), so a 90-day lookup silently
+  // missed anything older. phoneMatches below still applies the exact space-insensitive check.
   const candidates = await prisma.call.findMany({
-    where: { startedAt: { gte: start, lte: end } },
+    where: {
+      startedAt: { gte: start, lte: end },
+      OR: variants.flatMap((v) => [{ fromNumber: { contains: v } }, { toNumber: { contains: v } }]),
+    },
     orderBy: { startedAt: "desc" },
     take: 200,
   });
