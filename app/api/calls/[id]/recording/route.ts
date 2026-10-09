@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { validateApiKey } from "@/lib/api-keys";
+import { apiViewer } from "@/lib/api-keys";
+import { canSeeLine } from "@/lib/access";
 import { getRecordingUrl } from "@/lib/storage";
 
 /**
@@ -12,14 +13,14 @@ import { getRecordingUrl } from "@/lib/storage";
  * instead; it resolves to a freshly generated signed URL on every request instead of going stale.
  */
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const auth = await validateApiKey(req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null, "/api/calls");
-  if (!auth) {
+  const viewer = await apiViewer(req);
+  if (!viewer) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
   const { id } = await params;
-  const call = await prisma.call.findUnique({ where: { id }, select: { recordingKey: true } });
-  if (!call?.recordingKey) {
+  const call = await prisma.call.findUnique({ where: { id }, select: { recordingKey: true, lineId: true } });
+  if (!call?.recordingKey || !canSeeLine(viewer, call.lineId)) {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
 

@@ -2,8 +2,22 @@
 // PROVIDER ADAPTER CONTRACT
 // Every telephony/call-intelligence provider (allo, leexi, twilio, aircall, ringover, ...)
 // implements this so the sync worker, the Call schema, and /api/calls never need to know which
-// provider a given line belongs to.
+// provider a given line belongs to. Adapters only fetch + normalize one page; cursor, lookback and
+// backfill logic lives once in lib/sync/ so every provider gets the same never-miss guarantees.
 // ============================================
+
+/** Who spoke, normalized across providers. Provider's own label is kept in `source`. */
+export type TranscriptSpeaker = "SDR" | "PROSPECT" | "AGENT" | "UNKNOWN";
+
+export interface TranscriptSegment {
+  speaker: TranscriptSpeaker;
+  /** Provider's raw speaker label (Allo: USER / EXTERNAL / AGENT). */
+  source: string;
+  text: string;
+  /** Offsets in seconds from call start, when the provider gives them. */
+  start?: number;
+  end?: number;
+}
 
 export interface NormalizedCall {
   providerCallId: string;
@@ -15,31 +29,26 @@ export interface NormalizedCall {
   endedAt?: Date;
   durationSec: number;
   summary?: string;
+  /** Plain text, one "SOURCE: text" turn per line. */
   transcription?: string;
-  /** Provider's own media URL — fetched once by the worker, then discarded. Never persisted. */
+  transcriptSegments?: TranscriptSegment[];
+  /** Provider's own media URL — fetched by the recording-mirror queue, then never used again. */
   recordingUrl?: string;
   raw: Record<string, unknown>;
 }
 
-export interface LineCursor {
-  lineId: string;
-  externalNumber: string;
-  lastSyncedAt: Date | null;
-}
-
-export interface SyncResult {
+export interface ProviderPage {
+  /** Newest-first. */
   calls: NormalizedCall[];
-  /** New high-water mark — the worker persists this to SyncCursor after a successful run. */
-  newLastSyncedAt: Date | null;
+  totalPages: number;
 }
 
-/** Implemented by poll-based providers (WithAllo, Leexi today). */
+/** Implemented by poll-based providers (WithAllo, Leexi). */
 export interface PollableCallProvider {
   slug: string;
   /**
-   * Fetch only calls newer than `cursor.lastSyncedAt` for one line, walking pages forward until
-   * either an already-seen call is hit or `maxPages` is reached (safety cap — should rarely
-   * trigger once cursors are warm).
+   * Fetch one page (0-based) of a line's call list, newest first. Throws on any non-retriable
+   * failure so the caller never mistakes an error for "no more calls".
    */
-  syncLine(cursor: LineCursor, maxPages: number): Promise<SyncResult>;
+  fetchPage(externalNumber: string, page: number): Promise<ProviderPage>;
 }

@@ -10,7 +10,7 @@ import { getStorageProvider } from "../storage";
  *  - a 2xx response whose content-type isn't audio/* — some providers (WithAllo confirmed) 200 an
  *    unauthenticated/expired request with a login or summary HTML page instead of erroring, which
  *    silently "succeeds" if you only check res.ok. Pass `headers` for whatever auth the provider's
- *    recording endpoint needs (see lib/providers/recording-auth.ts) — but even with the right
+ *    recording endpoint needs (see lib/providers/recordings.ts) — but even with the right
  *    headers, keep this check as a backstop against the same failure mode recurring.
  */
 export async function mirrorRecording(params: {

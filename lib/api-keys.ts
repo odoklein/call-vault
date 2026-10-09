@@ -5,6 +5,7 @@
 
 import crypto from "crypto";
 import { prisma } from "./db";
+import { viewerForApiKey, type Viewer } from "./access";
 
 const KEY_PREFIX = "vault_live_";
 
@@ -23,6 +24,8 @@ export interface ValidatedApiKey {
   id: string;
   name: string;
   allowedEndpoints: string[];
+  /** null = operator key (every line); set = that client's granted lines only (lib/access.ts). */
+  clientId: string | null;
 }
 
 export async function validateApiKey(rawKey: string | null, endpoint: string): Promise<ValidatedApiKey | null> {
@@ -38,5 +41,11 @@ export async function validateApiKey(rawKey: string | null, endpoint: string): P
 
   await prisma.apiKey.update({ where: { id: key.id }, data: { lastUsedAt: new Date() } });
 
-  return { id: key.id, name: key.name, allowedEndpoints: allowed };
+  return { id: key.id, name: key.name, allowedEndpoints: allowed, clientId: key.clientId };
+}
+
+/** Bearer-auth + access resolution shared by every /api/calls* route. */
+export async function apiViewer(req: Request, endpoint = "/api/calls"): Promise<Viewer | null> {
+  const key = await validateApiKey(req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null, endpoint);
+  return key ? viewerForApiKey(key) : null;
 }

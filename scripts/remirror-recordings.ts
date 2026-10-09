@@ -3,10 +3,9 @@
 // recording URL from the already-stored rawPayload — this never re-queries WithAllo's call list,
 // so it carries zero 429 risk regardless of how many calls it processes.
 //
-// NOTE: resetting recordingStatus to PENDING and waiting for the next cron tick does NOT work for
-// this — the incremental sync (lib/providers/allo/sync.ts) only re-visits calls newer than
-// SyncCursor.lastSyncedAt, so anything the cursor has already passed is never looked at again by
-// the normal sync path. This script is the actual fix, not a convenience wrapper around one.
+// NOTE: the sync only re-reads calls inside its lookback window (lib/sync/walk.ts), and the
+// recording-mirror queue gives up after RECORDING_MIRROR_ATTEMPTS — so FAILED rows older than the
+// window are never retried automatically. This script is the manual retry for those.
 //
 // Usage:
 //   npm run remirror-recordings                    # re-mirrors STORED + FAILED (the default)
@@ -16,14 +15,7 @@ import "dotenv/config";
 import { RecordingStatus } from "@prisma/client";
 import { prisma } from "../lib/db";
 import { mirrorRecording } from "../lib/audio/mirror-recording";
-import { getRecordingAuthHeaders } from "../lib/providers/recording-auth";
-
-function extractRecordingUrl(rawPayload: unknown): string | null {
-  if (!rawPayload || typeof rawPayload !== "object") return null;
-  const raw = rawPayload as Record<string, unknown>;
-  const candidate = raw.recording_url ?? raw.recording;
-  return typeof candidate === "string" && /^https?:\/\//i.test(candidate) ? candidate : null;
-}
+import { getRecordingAuthHeaders, recordingUrlFromPayload } from "../lib/providers/recordings";
 
 async function main() {
   const statusArg = process.argv.find((a) => a.startsWith("--status="));
@@ -51,7 +43,7 @@ async function main() {
   let skipped = 0;
 
   for (const call of calls) {
-    const recordingUrl = extractRecordingUrl(call.rawPayload);
+    const recordingUrl = recordingUrlFromPayload(call.provider.slug, call.rawPayload);
     if (!recordingUrl) {
       console.warn(`  skip ${call.id} — no recording URL in rawPayload`);
       skipped += 1;

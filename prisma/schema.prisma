@@ -20,7 +20,7 @@ enum RecordingStatus {
   NONE // provider had no recording
   PENDING // call seen, recording not fetched/mirrored yet
   STORED // mirrored to our own storage — recordingKey is authoritative
-  FAILED // fetch/upload failed; retry via the worker
+  FAILED // fetch/upload failed after every retry; scripts/remirror-recordings.ts can try again
 }
 
 enum WebhookDeliveryStatus {
@@ -61,29 +61,47 @@ model Line {
   /// Free-form pointer back to the CRM (a User id or email) — never a real FK, the two apps
   /// have separate databases on purpose (see plan: "Why a separate DB").
   crmOwnerRef    String?
+  /// CRM User.id of the SDR this number belongs to, resolved from CRM User.alloPhoneNumber by the
+  /// directory sync (lib/crm/directory-sync.ts). This is what lets the matcher refuse to attach
+  /// one SDR's call to another SDR's action.
+  crmUserId      String?
+  /// "env" = seeded from ALLO_NUMBERS, "crm" = auto-provisioned from a CRM User.alloPhoneNumber.
+  source         String   @default("env")
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
 
   syncCursors SyncCursor[]
+  calls       Call[]
+  clients     ClientLine[]
 
   @@unique([providerId, externalNumber])
   @@index([isActive])
+  @@index([crmUserId])
 }
 
-/// Per (provider, line) incremental sync watermark. Poll-based adapters read this before fetching
-/// so a sync run only walks pages newer than what's already stored — this is the main lever that
-/// removes 429 pressure vs. today's "rescan up to MAX_PAGES every time" design.
+/// Per (provider, line) sync state. Poll-based adapters walk newest-first and stop a little before
+/// `lastSyncedAt` (the lookback window), so content that settles after the call — transcript,
+/// summary, recording — is picked up on a later pass instead of being frozen at its first sighting.
 model SyncCursor {
-  id           String    @id @default(cuid())
-  providerId   String
-  provider     Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
-  lineId       String
-  line         Line      @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  id               String    @id @default(cuid())
+  providerId       String
+  provider         Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  lineId           String
+  line             Line      @relation(fields: [lineId], references: [id], onDelete: Cascade)
   /// Newest call start time already stored for this line.
-  lastSyncedAt DateTime?
-  lastSyncAt   DateTime? // wall-clock time of the last successful run (for staleness alerts)
-  lastError    String?
-  updatedAt    DateTime  @updatedAt
+  lastSyncedAt     DateTime?
+  lastSyncAt       DateTime? // wall-clock time of the last successful run (for staleness alerts)
+  /// Last run that used the long (deep sweep) lookback, to catch content that settled very late.
+  lastDeepSweepAt  DateTime?
+  lastError        String?
+  /// History backfill: walk pages down to this date. Set by scripts/backfill.ts, or automatically
+  /// when an incremental run hits its page cap before reaching the lookback boundary (a gap).
+  backfillUntil    DateTime?
+  /// Page index the backfill resumes from. Allo lists newest-first, so calls arriving meanwhile
+  /// only push older ones to later pages — resuming by index can repeat a call, never skip one.
+  backfillNextPage Int?
+  backfillDoneAt   DateTime?
+  updatedAt        DateTime  @updatedAt
 
   @@unique([providerId, lineId])
 }
@@ -92,16 +110,22 @@ model SyncCursor {
 // CALLS
 // ============================================
 
-/// The vault's own record of a call, provider-agnostic. This is what the CRM ultimately reads —
-/// directly (never), always through /api/calls or the call-ready webhook.
+/// The vault's own record of a call, provider-agnostic. The CRM reads it through /api/calls*,
+/// never directly.
 model Call {
   id             String        @id @default(cuid())
   providerId     String
   provider       Provider      @relation(fields: [providerId], references: [id])
   providerCallId String
+  /// The line this call was synced from (= which SDR placed/received it, via Line.crmUserId).
+  lineId         String?
+  line           Line?         @relation(fields: [lineId], references: [id], onDelete: SetNull)
   direction      CallDirection @default(OUTBOUND)
   fromNumber     String
   toNumber       String
+  /// The other party in E.164 (toNumber for OUTBOUND, fromNumber for INBOUND). All phone lookups
+  /// go through this column — equality on an index, not a substring scan.
+  remoteNumber   String?
   /// Provider's raw status/outcome string (kept as-is, not modeled as an enum — every provider
   /// has a different vocabulary).
   status         String?
@@ -111,17 +135,27 @@ model Call {
 
   /// Our own storage key (S3 or local). Provider media URLs are fetched exactly once and never
   /// referenced again once recordingStatus = STORED.
-  recordingKey    String?
-  recordingStatus RecordingStatus @default(NONE)
-  transcription   String?         @db.Text
-  aiSummary       String?         @db.Text
-  aiExtraction    Json?
-  /// Full provider payload, kept for debugging / re-processing without another API call.
-  rawPayload      Json
+  recordingKey       String?
+  recordingStatus    RecordingStatus @default(NONE)
+  /// Plain-text transcript, one "SPEAKER: text" turn per line (kept for full-text search and for
+  /// the CRM's existing /api/calls consumers).
+  transcription      String?         @db.Text
+  /// Same transcript, structured: [{ speaker: "SDR" | "PROSPECT" | "AGENT", text, start?, end? }].
+  transcriptSegments Json?
+  /// When the transcript first appeared in the vault — the gap to startedAt is the provider's
+  /// transcription latency, and a long conversation with this still null is a missing transcript.
+  transcriptAt       DateTime?
+  aiSummary          String?         @db.Text
+  aiExtraction       Json?
+  /// Full provider payload from the latest sighting, kept for debugging / re-processing without
+  /// another API call.
+  rawPayload         Json
+  /// Last time the provider's list returned this call.
+  lastSeenAt         DateTime?
 
-  /// Best-effort heuristic match info (used for Allo/Leexi, which can't tag a dial with a CRM id).
-  matchedCrmContactPhone String?
-  matchedCrmActionId     String?
+  /// Trigger-maintained (see migration 20261009000000_never_miss_transcripts): French full-text
+  /// index over aiSummary (weight A) + transcription (weight B). Never written by the app.
+  searchVector Unsupported("tsvector")?
 
   consentAnnounced Boolean   @default(false)
   purgeAfter       DateTime?
@@ -130,12 +164,78 @@ model Call {
   updatedAt DateTime @updatedAt
 
   webhookDeliveries WebhookDelivery[]
+  crmAction         CrmAction?
 
   @@unique([providerId, providerCallId])
   @@index([fromNumber])
   @@index([toNumber])
   @@index([startedAt])
-  @@index([matchedCrmActionId])
+  @@index([remoteNumber, startedAt])
+  @@index([lineId, startedAt])
+  @@index([searchVector], type: Gin)
+}
+
+// ============================================
+// CRM LINKS (read-only mirror — the vault never writes to the CRM)
+// ============================================
+
+enum MatchStatus {
+  PENDING // not settled yet, or the SDR's line hasn't synced past the action time
+  MATCHED // callId is set
+  UNMATCHED // gave up after the match window — no vault call fits
+  NO_PHONE // the action has no usable phone number to match on
+}
+
+enum MatchConfidence {
+  HIGH // SDR's own line + same number + call ended within minutes of the action being logged
+  MEDIUM // same number, plausible timing, but either the line owner is unknown or the gap is long
+  LOW // same number only, weak timing
+}
+
+/// One CRM CALL action (Action.channel = CALL), mirrored by lib/crm/directory-sync.ts and matched
+/// one-to-one to the vault Call it records by lib/linking/. The link lives here, in the vault —
+/// the CRM's own Action row is never modified by this.
+model CrmAction {
+  /// CRM Action.id
+  id              String           @id
+  sdrUserId       String
+  contactId       String?
+  companyId       String?
+  campaignId      String
+  missionId       String
+  clientId        String
+  /// CRM ActionResult code (RAPPEL, MEETING_BOOKED, ...), as text.
+  result          String
+  /// CRM Action.createdAt — when the SDR logged the outcome, normally just after hanging up.
+  loggedAt        DateTime
+  /// E.164 candidates: meetingPhone, contact phone + additionalPhones, company phone + customData.
+  phones          String[]
+
+  callId          String?          @unique
+  call            Call?            @relation(fields: [callId], references: [id], onDelete: SetNull)
+  matchStatus     MatchStatus      @default(PENDING)
+  matchConfidence MatchConfidence?
+  /// Human-readable why: "same SDR line, ended 1m before log".
+  matchReason     String?
+  matchedAt       DateTime?
+
+  syncedAt        DateTime         @updatedAt
+  createdAt       DateTime         @default(now())
+
+  @@index([loggedAt])
+  @@index([matchStatus, loggedAt])
+  @@index([sdrUserId, loggedAt])
+  @@index([contactId])
+  @@index([companyId])
+  @@index([clientId, loggedAt])
+}
+
+/// Small key/value store for sync watermarks that don't belong to a provider line
+/// (e.g. "crm.actions.watermark").
+model SyncState {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
 }
 
 /// Outbound delivery ledger, vault -> CRM. Turns "the fiche didn't update" from a silent miss into
@@ -157,11 +257,87 @@ model WebhookDelivery {
 }
 
 // ============================================
-// AUTH (CRM <-> vault, both directions)
+// CLIENTS (multi-tenant access to the vault)
+// The Allo account and every line belong to the operator (Suzali Conseil, role ADMIN). A Client
+// (e.g. Captain Prospect) sees exactly the calls of the lines granted to it in ClientLine —
+// on the web board and through its API keys alike (lib/access.ts is the only place that decides).
 // ============================================
 
-/// Same shape as the CRM's ApiKey model (lib/api-keys.ts / prisma/schema.prisma), without the
-/// CRM-specific Client/Mission/UserRole scoping — this app has no such concepts.
+enum UserRole {
+  ADMIN // operator staff: every line, every client, all settings
+  CLIENT // a client's user: their granted lines only, read-only
+}
+
+model Client {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines   ClientLine[]
+  users   User[]
+  apiKeys ApiKey[]
+}
+
+/// "Client X may see the calls of line Y" — past and future. No row, no visibility.
+model ClientLine {
+  clientId    String
+  client      Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  lineId      String
+  line        Line     @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  grantedAt   DateTime @default(now())
+  /// User.id of the admin who granted it.
+  grantedById String?
+
+  @@id([clientId, lineId])
+  @@index([lineId])
+}
+
+/// Web users. A CHECK constraint (migration 20261010000000_multi_client) enforces
+/// ADMIN <=> clientId IS NULL and CLIENT <=> clientId IS NOT NULL.
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  /// scrypt, see lib/auth/password.ts
+  passwordHash String
+  role         UserRole
+  clientId     String?
+  client       Client?   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  isActive     Boolean   @default(true)
+  failedLogins Int       @default(0)
+  lockedUntil  DateTime?
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  sessions Session[]
+
+  @@index([clientId])
+}
+
+/// Server-side sessions: the cookie holds a random token, only its SHA-256 is stored.
+model Session {
+  id         String   @id @default(cuid())
+  tokenHash  String   @unique
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ============================================
+// API KEYS (services -> vault)
+// ============================================
+
+/// Same shape as the CRM's ApiKey model (lib/api-keys.ts / prisma/schema.prisma). clientId null =
+/// operator key (every line, e.g. the integration key used before clients existed); clientId set =
+/// that client's granted lines only.
 model ApiKey {
   id                 String    @id @default(cuid())
   name               String
@@ -170,6 +346,8 @@ model ApiKey {
   allowedEndpoints   Json      @default("[]")
   rateLimitPerMinute Int       @default(60)
   rateLimitPerHour   Int       @default(1000)
+  clientId           String?
+  client             Client?   @relation(fields: [clientId], references: [id], onDelete: Cascade)
   isActive           Boolean   @default(true)
   lastUsedAt         DateTime?
   expiresAt          DateTime?
@@ -178,4 +356,5 @@ model ApiKey {
 
   @@index([keyHash])
   @@index([isActive])
+  @@index([clientId])
 }

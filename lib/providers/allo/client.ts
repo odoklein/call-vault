@@ -1,9 +1,10 @@
 // Low-level WithAllo HTTP client: fetch one page + normalize its calls.
 // Retry/backoff logic ported as-is from captainprospect-crm's
 // lib/call-enrichment/allo-provider.ts (fetchPageForLine) — that part was never the problem,
-// it's genuinely careful. What changes is who calls it and how often (see sync.ts).
+// it's genuinely careful. What changes is who calls it and how often (see lib/sync/).
 
 import { parseAlloCallsListResponse } from "./allo-response";
+import { normalizeAlloCall } from "./normalize";
 import type { NormalizedCall } from "../types";
 
 const BASE_URL = "https://api.withallo.com";
@@ -55,62 +56,8 @@ function retryAfterMs(res: Response): number | null {
   return null;
 }
 
-interface AlloTranscriptEntry {
-  source: "AGENT" | "EXTERNAL" | "USER";
-  text: string;
-}
-
-function normalizeAlloCall(raw: Record<string, unknown>): NormalizedCall & { id: string } {
-  const from = String(raw.from ?? raw.from_number ?? "");
-  const to = String(raw.to ?? raw.to_number ?? "");
-  const typeRaw = String(raw.direction ?? raw.type ?? "OUTBOUND").toUpperCase();
-  const direction: "INBOUND" | "OUTBOUND" = typeRaw === "INBOUND" ? "INBOUND" : "OUTBOUND";
-
-  let duration = typeof raw.duration === "number" ? raw.duration : 0;
-  if (!duration && typeof raw.length_in_minutes === "number") {
-    duration = Math.round(raw.length_in_minutes * 60);
-  }
-
-  const startRaw = raw.start_time ?? raw.start_date ?? raw.created_at;
-  const startedAt = (() => {
-    if (startRaw === undefined || startRaw === null || startRaw === "") return undefined;
-    if (typeof startRaw === "number") return new Date(startRaw > 1e12 ? startRaw : startRaw * 1000);
-    const d = new Date(startRaw as string);
-    return Number.isNaN(d.getTime()) ? undefined : d;
-  })();
-
-  const recordingRaw = raw.recording_url ?? raw.recording;
-  const recordingUrl = typeof recordingRaw === "string" && /^https?:\/\//i.test(recordingRaw) ? recordingRaw : undefined;
-
-  const summary =
-    typeof raw.summary === "string" ? raw.summary : typeof raw.call_summary === "string" ? raw.call_summary : undefined;
-
-  const transcriptArr = Array.isArray(raw.transcript) ? (raw.transcript as AlloTranscriptEntry[]) : undefined;
-  const transcriptPlain = typeof raw.transcription === "string" && raw.transcription.trim() ? raw.transcription : undefined;
-  const transcription = transcriptArr?.length
-    ? transcriptArr.map((e) => `${e.source}: ${e.text}`).join("\n")
-    : transcriptPlain;
-
-  return {
-    id: String(raw.id ?? ""),
-    providerCallId: String(raw.id ?? ""),
-    from,
-    to,
-    direction,
-    fromNumber: from,
-    toNumber: to,
-    status: typeof raw.outcome === "string" ? raw.outcome : undefined,
-    startedAt,
-    durationSec: duration,
-    summary: summary?.trim() || undefined,
-    transcription: transcription?.trim() || undefined,
-    recordingUrl,
-    raw,
-  } as NormalizedCall & { id: string };
-}
-
 export interface AlloPageResult {
-  calls: (NormalizedCall & { id: string })[];
+  calls: NormalizedCall[];
   totalPages: number;
   httpOk: boolean;
   httpStatus: number;
@@ -152,7 +99,7 @@ export async function fetchAlloPage(apiKey: string, alloNumber: string, page: nu
 
         const data = await res.json();
         const { rawCalls, totalPages } = parseAlloCallsListResponse(data);
-        const calls = rawCalls.map(normalizeAlloCall).filter((c) => c.id);
+        const calls = rawCalls.map(normalizeAlloCall).filter((c) => c.providerCallId);
         return { calls, totalPages, httpOk: true, httpStatus: res.status };
       }
       return { calls: [], totalPages: 0, httpOk: false, httpStatus: 429 };

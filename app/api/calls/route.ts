@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { validateApiKey } from "@/lib/api-keys";
+import { apiViewer } from "@/lib/api-keys";
+import { visibleLineIds } from "@/lib/access";
 import { contentScore, phoneMatches, phoneVariants } from "@/lib/phone-match";
 import { getRecordingUrl } from "@/lib/storage";
 
@@ -18,8 +19,8 @@ const MAX_LIMIT = 50;
  * path, higher for the manual "which call was it" picker.
  */
 export async function GET(req: NextRequest) {
-  const auth = await validateApiKey(req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null, "/api/calls");
-  if (!auth) {
+  const viewer = await apiViewer(req);
+  if (!viewer) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
@@ -47,6 +48,7 @@ export async function GET(req: NextRequest) {
   const candidates = await prisma.call.findMany({
     where: {
       startedAt: { gte: start, lte: end },
+      ...(viewer.kind === "client" ? { lineId: { in: visibleLineIds(viewer) } } : {}),
       OR: variants.flatMap((v) => [{ fromNumber: { contains: v } }, { toNumber: { contains: v } }]),
     },
     orderBy: { startedAt: "desc" },

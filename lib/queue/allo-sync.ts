@@ -2,20 +2,22 @@
 // ALLO SYNC QUEUE
 // One BullMQ queue, one worker, concurrency 1 + a global rate limiter — enforced by Redis, so it
 // holds regardless of how many web/API instances are running. This is the actual fix for the
-// 429s: a single process is the only thing ever allowed to call WithAllo.
+// 429s: a single process is the only thing ever allowed to call WithAllo's list API.
 // ============================================
 
 import { Queue, Worker, type Job } from "bullmq";
 import { REDIS_CONFIG, checkRedisOnce, isRedisAvailable } from "./redis";
 import { prisma } from "../db";
 import { alloProvider } from "../providers/allo/sync";
-import { mirrorRecording } from "../audio/mirror-recording";
-import { getRecordingAuthHeaders } from "../providers/recording-auth";
+import { syncLineOnce } from "../sync/line-sync";
+import { syncConfigFromEnv } from "../sync/walk";
+import { enqueueRecordingMirrors } from "./recording-mirror";
 import { canExecute, recordFailure, recordSuccess } from "../circuit-breaker";
 
 // BullMQ rejects colons in queue names outright — keep this alphanumeric/hyphen only.
 const QUEUE_NAME = "vault-allo-sync";
-const MAX_PAGES = Math.max(1, parseInt(process.env.ALLO_SYNC_MAX_PAGES ?? "20", 10));
+const SCHEDULER_PREFIX = "allo-sync-";
+const SYNC_CONFIG = syncConfigFromEnv();
 
 interface AlloSyncJobData {
   lineId: string;
@@ -39,37 +41,45 @@ export function getAlloSyncQueue(): Queue<AlloSyncJobData> {
   return queue;
 }
 
-/** One repeatable job per active Allo line — set up once at worker boot. */
-export async function scheduleAlloRepeatingSyncs(): Promise<void> {
+/**
+ * Make the repeatable jobs match the active Allo lines in the DB: one scheduler per active line,
+ * none for inactive/deleted ones. Idempotent — called at boot and after every CRM directory sync,
+ * so a line auto-provisioned from a new SDR's Allo number starts syncing without a restart.
+ */
+export async function reconcileAlloLineSchedules(): Promise<{ active: number; removed: number }> {
   await checkRedisOnce();
-  if (!isRedisAvailable()) return;
+  if (!isRedisAvailable()) return { active: 0, removed: 0 };
 
   const provider = await prisma.provider.findUnique({ where: { slug: "allo" } });
-  if (!provider || !provider.isActive) {
-    console.log("[call-vault][allo] provider inactive/missing — no sync jobs scheduled");
-    return;
-  }
-
-  const lines = await prisma.line.findMany({ where: { providerId: provider.id, isActive: true } });
+  const lines =
+    provider && provider.isActive
+      ? await prisma.line.findMany({ where: { providerId: provider.id, isActive: true }, select: { id: true } })
+      : [];
   const cronPattern = process.env.ALLO_SYNC_CRON ?? "*/2 * * * *";
   const q = getAlloSyncQueue();
 
+  const wanted = new Set(lines.map((l) => `${SCHEDULER_PREFIX}${l.id}`));
   for (const line of lines) {
-    await q.upsertJobScheduler(
-      `allo-sync-${line.id}`,
-      { pattern: cronPattern },
-      { name: "sync-line", data: { lineId: line.id } },
-    );
+    await q.upsertJobScheduler(`${SCHEDULER_PREFIX}${line.id}`, { pattern: cronPattern }, { name: "sync-line", data: { lineId: line.id } });
   }
 
-  console.log(`[call-vault][allo] scheduled ${lines.length} line(s) on pattern "${cronPattern}"`);
+  let removed = 0;
+  for (const scheduler of await q.getJobSchedulers()) {
+    const id = scheduler.key ?? scheduler.id;
+    if (id && id.startsWith(SCHEDULER_PREFIX) && !wanted.has(id)) {
+      await q.removeJobScheduler(id);
+      removed += 1;
+    }
+  }
+
+  return { active: lines.length, removed };
 }
 
 export function createAlloSyncWorker(): Worker<AlloSyncJobData> {
   const worker = new Worker<AlloSyncJobData>(
     QUEUE_NAME,
     async (job: Job<AlloSyncJobData>) => {
-      const line = await prisma.line.findUnique({ where: { id: job.data.lineId }, include: { provider: true } });
+      const line = await prisma.line.findUnique({ where: { id: job.data.lineId } });
       if (!line || !line.isActive) return { skipped: true };
 
       const circuitKey = `${line.providerId}:${line.id}`;
@@ -78,80 +88,29 @@ export function createAlloSyncWorker(): Worker<AlloSyncJobData> {
         return { skipped: true, reason: "circuit_open" };
       }
 
-      const cursorRow = await prisma.syncCursor.findUnique({
-        where: { providerId_lineId: { providerId: line.providerId, lineId: line.id } },
-      });
-
       try {
-        const result = await alloProvider.syncLine(
-          { lineId: line.id, externalNumber: line.externalNumber, lastSyncedAt: cursorRow?.lastSyncedAt ?? null },
-          MAX_PAGES,
-        );
-
-        for (const call of result.calls) {
-          const savedCall = await prisma.call.upsert({
-            where: { providerId_providerCallId: { providerId: line.providerId, providerCallId: call.providerCallId } },
-            create: {
-              providerId: line.providerId,
-              providerCallId: call.providerCallId,
-              direction: call.direction,
-              fromNumber: call.fromNumber,
-              toNumber: call.toNumber,
-              status: call.status,
-              startedAt: call.startedAt,
-              durationSec: call.durationSec,
-              transcription: call.transcription,
-              aiSummary: call.summary,
-              rawPayload: call.raw as object,
-              recordingStatus: call.recordingUrl ? "PENDING" : "NONE",
-            },
-            update: {
-              // Allo call content can arrive/settle after the call itself (summary/recording lag) —
-              // re-apply on every sighting rather than only on first insert.
-              status: call.status,
-              transcription: call.transcription,
-              aiSummary: call.summary,
-              recordingStatus: call.recordingUrl ? "PENDING" : "NONE",
-            },
-          });
-
-          if (call.recordingUrl && savedCall.recordingStatus !== "STORED") {
-            const mirrored = await mirrorRecording({
-              recordingUrl: call.recordingUrl,
-              providerSlug: "allo",
-              callId: savedCall.id,
-              headers: getRecordingAuthHeaders("allo"),
-            });
-            await prisma.call.update({
-              where: { id: savedCall.id },
-              data: mirrored
-                ? { recordingKey: mirrored.key, recordingStatus: "STORED" }
-                : { recordingStatus: "FAILED" },
-            });
-          }
+        const result = await syncLineOnce({ provider: alloProvider, providerId: line.providerId, line, config: SYNC_CONFIG });
+        await enqueueRecordingMirrors(result.toMirror);
+        if (result.incremental.gap) {
+          console.warn(
+            `[call-vault][allo] line=${line.externalNumber} hit the ${SYNC_CONFIG.maxPages}-page cap before its lookback ` +
+              `boundary — remaining pages handed to backfill, nothing skipped`,
+          );
         }
-
-        await prisma.syncCursor.upsert({
-          where: { providerId_lineId: { providerId: line.providerId, lineId: line.id } },
-          create: {
-            providerId: line.providerId,
-            lineId: line.id,
-            lastSyncedAt: result.newLastSyncedAt,
-            lastSyncAt: new Date(),
-            lastError: null,
-          },
-          update: { lastSyncedAt: result.newLastSyncedAt, lastSyncAt: new Date(), lastError: null },
-        });
-
         recordSuccess(circuitKey);
-        return { newCalls: result.calls.length };
+        return {
+          calls: result.incremental.calls,
+          deep: result.incremental.deep,
+          backfill: result.backfill,
+          recordingsQueued: result.toMirror.length,
+        };
       } catch (err) {
         recordFailure(circuitKey);
         const message = err instanceof Error ? err.message : String(err);
         await prisma.syncCursor.upsert({
           where: { providerId_lineId: { providerId: line.providerId, lineId: line.id } },
-          create: { providerId: line.providerId, lineId: line.id, lastSyncAt: new Date(), lastError: message },
-          update: { lastSyncAt: new Date(), lastError: message },
+          create: { providerId: line.providerId, lineId: line.id, lastError: message },
+          update: { lastError: message },
         });
         throw err;
       }

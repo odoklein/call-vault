@@ -10,6 +10,37 @@ export interface StorageProvider {
   upload(file: Buffer, key: string, mimeType: string): Promise<string>;
   download(key: string): Promise<Buffer>;
   delete(key: string): Promise<void>;
+  /** Byte stream (optionally one HTTP Range) — for serving audio through the app with seeking. */
+  stream(key: string, range?: string): Promise<StoredStream>;
+}
+
+export interface StoredStream {
+  body: ReadableStream<Uint8Array>;
+  contentType: string;
+  contentLength?: number;
+  /** Set for a partial (206) response. */
+  contentRange?: string;
+  totalSize?: number;
+}
+
+/** Parses "bytes=a-b" against a known size. Returns null for absent/unsatisfiable ranges. */
+export function parseRange(range: string | undefined, size: number): { start: number; end: number } | null {
+  const m = range?.match(/^bytes=(\d*)-(\d*)$/);
+  if (!m || (m[1] === "" && m[2] === "")) return null;
+  let start: number;
+  let end: number;
+  if (m[1] === "") {
+    start = Math.max(0, size - Number(m[2]));
+    end = size - 1;
+  } else {
+    start = Number(m[1]);
+    end = m[2] === "" ? size - 1 : Math.min(Number(m[2]), size - 1);
+  }
+  return start <= end && start < size ? { start, end } : null;
+}
+
+function mimeFromKey(key: string): string {
+  return key.endsWith(".wav") ? "audio/wav" : key.endsWith(".ogg") ? "audio/ogg" : "audio/mpeg";
 }
 
 // ============================================
@@ -38,6 +69,19 @@ class LocalStorageProvider implements StorageProvider {
 
   async delete(key: string): Promise<void> {
     await unlink(path.join(this.basePath, key));
+  }
+
+  async stream(key: string, range?: string): Promise<StoredStream> {
+    const full = await readFile(path.join(this.basePath, key));
+    const r = parseRange(range, full.length);
+    const bytes = r ? full.subarray(r.start, r.end + 1) : full;
+    return {
+      body: new Blob([new Uint8Array(bytes)]).stream(),
+      contentType: mimeFromKey(key),
+      contentLength: bytes.length,
+      contentRange: r ? `bytes ${r.start}-${r.end}/${full.length}` : undefined,
+      totalSize: full.length,
+    };
   }
 }
 
@@ -88,6 +132,23 @@ class S3StorageProvider implements StorageProvider {
   async getSignedUrl(key: string, expiresIn = 3600): Promise<string> {
     return getS3SignedUrl(this.client, new GetObjectCommand({ Bucket: this.bucket, Key: key }), { expiresIn });
   }
+
+  async stream(key: string, range?: string): Promise<StoredStream> {
+    return s3Stream(this.client, this.bucket, key, range);
+  }
+}
+
+async function s3Stream(client: S3Client, bucket: string, key: string, range?: string): Promise<StoredStream> {
+  const res = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key, Range: range }));
+  if (!res.Body) throw new Error(`empty object ${key}`);
+  const total = res.ContentRange ? Number(res.ContentRange.split("/")[1]) : res.ContentLength;
+  return {
+    body: res.Body.transformToWebStream() as ReadableStream<Uint8Array>,
+    contentType: res.ContentType || mimeFromKey(key),
+    contentLength: res.ContentLength,
+    contentRange: res.ContentRange,
+    totalSize: Number.isFinite(total) ? total : undefined,
+  };
 }
 
 async function streamToBuffer(stream: GetObjectCommandOutput["Body"]): Promise<Buffer> {
@@ -143,6 +204,10 @@ class MinioStorageProvider implements StorageProvider {
 
   async getSignedUrl(key: string, expiresIn = 3600): Promise<string> {
     return getS3SignedUrl(this.client, new GetObjectCommand({ Bucket: this.bucket, Key: key }), { expiresIn });
+  }
+
+  async stream(key: string, range?: string): Promise<StoredStream> {
+    return s3Stream(this.client, this.bucket, key, range);
   }
 }
 
