@@ -11,7 +11,7 @@
 // Queues:
 //   vault-allo-sync         per-line incremental sync + lookback + history backfill
 //   vault-recording-mirror  provider audio -> our storage, with retries + a stale-PENDING sweep
-//   vault-crm-sync          CRM SDR lines + CALL actions (read-only) -> matcher (if CRM_DATABASE_URL)
+//   vault-crm-sync          CRM SDR lines + CALL actions (read-only, via the CRM API or DB) -> matcher
 //
 // Usage: npm run worker   (== tsx worker.ts)
 // ============================================
@@ -40,7 +40,7 @@ async function main() {
   console.log(`[call-vault][allo] ${schedules.active} line(s) scheduled on "${process.env.ALLO_SYNC_CRON ?? "*/2 * * * *"}"`);
   await scheduleRecordingSweep();
   if (!(await scheduleCrmSync())) {
-    console.warn("[call-vault][crm] CRM_DATABASE_URL not set — no CRM linking, no line auto-provisioning.");
+    console.warn("[call-vault][crm] neither CRM_API_URL + CRM_API_KEY nor CRM_DATABASE_URL set — no CRM linking, no line auto-provisioning.");
   }
 
   console.log("[call-vault][worker] running. Ctrl+C to stop.");

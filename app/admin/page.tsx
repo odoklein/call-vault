@@ -36,7 +36,9 @@ export default async function DashboardPage() {
     }),
   ]);
   const t = coverage.totals;
+  const crm = coverage.crmSync;
   const problems =
+    (crm && !crm.ok ? 1 : 0) +
     coverage.sdrsWithoutLine.length + coverage.lines.filter((l) => l.stale || l.lastError).length + t.missingTranscript;
 
   return (
@@ -45,6 +47,17 @@ export default async function DashboardPage() {
       <p style={{ ...muted, marginTop: 0 }}>
         Last 7 days. Every call, transcript and recording from every SDR line, linked to the CRM action it records.
         Read-only — the worker process syncs; this page reports. {problems === 0 ? <Badge tone="ok">nothing missing</Badge> : <Badge tone="warn">{problems} issue(s) below</Badge>}
+      </p>
+
+      <p style={{ margin: "12px 0" }}>
+        Liaison CRM :{" "}
+        {!crm ? (
+          <span className="badge badge-off">jamais exécutée — CRM_API_URL / CRM_API_KEY manquants sur le worker ?</span>
+        ) : crm.ok ? (
+          <span className="badge badge-ok">OK · {crm.source} · {fmt(crm.at)} UTC</span>
+        ) : (
+          <span className="badge badge-warn">en échec depuis {fmt(crm.at)} UTC : {crm.error}</span>
+        )}
       </p>
 
       <table style={{ width: "auto" }}>

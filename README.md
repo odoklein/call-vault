@@ -47,13 +47,40 @@ The portal supports multi-tenant role-based access:
   - Numbers not granted to the client are completely invisible (404 on direct IDs, excluded from search, filtered from aggregate KPIs).
   - Secure audio streaming (`/media/calls/:id`) with HTTP Range support for seeking, without exposing object storage URLs.
 
+## Portal (calls.suzaliconseil.com): admin + clients
+
+Suzali Conseil owns the Allo account and every number. Two roles:
+
+- **ADMIN** (Suzali staff): all numbers and calls; creates clients; decides which numbers each client
+  may see; creates client users and API keys. Screens: `/admin` (overview + coverage), `/admin/clients`,
+  `/admin/clients/:id` (tick the numbers the client can see; users; API keys; "see what this client sees"),
+  `/admin/lines` (all numbers, labels, add a number).
+- **CLIENT** (e.g. Captain Prospect CRM): `/board` — KPIs, per-number breakdown, search in transcripts,
+  call page with audio + transcript — **only for the numbers granted to it**. Read-only.
+
+One rule decides visibility everywhere — web board, audio streaming (`/media/calls/:id`) and the API
+(`lib/access.ts`): admin = everything; client = calls of its granted lines; no grant = nothing; calls not
+attributed to a line are admin-only. A number you don't grant (e.g. an internal line) never appears to
+that client: not in lists, search, counts, transcripts or audio. API keys created on a client's page are
+bound to the same grants (`/api/calls*`); keys minted with `npm run mint-api-key` stay operator-wide.
+
+```bash
+npx prisma migrate deploy
+npm run create-admin -- you@suzaliconseil.com "Your Name"   # prints a password once
+```
+
+Set `APP_URL=https://calls.suzaliconseil.com` (secure cookies), point the subdomain's DNS at the Next.js
+app behind HTTPS, then log in at `/login`. Numbers appear under **Numéros** once synced
+(`ALLO_NUMBERS`, an SDR's `alloPhoneNumber` in the CRM, or "Ajouter un numéro"); Allo's API has no
+"list my numbers" call that this app uses, so numbers are added by one of those three routes.
+
 ## Processes
 
 - **Next.js app** (`npm run build && npm start`, port 5100): multi-client dashboard at `calls.suzaliconseil.com` with session authentication (`cv_session`), scrypt password hashing, and authenticated REST API (`/api/calls*`).
 - **Worker** (`npm run worker`): the only process that calls providers. Must run as a **single long-lived process** — exactly one thing enforces the provider's rate limit. Queues:
   - `vault-allo-sync` — per line, every 2 min: incremental + lookback, then one backfill step.
   - `vault-recording-mirror` — audio downloads, retried, plus a 10-min stale-`PENDING` sweep.
-  - `vault-crm-sync` — every 5 min (if `CRM_DATABASE_URL`): SDR lines → line schedules → CALL actions → matcher.
+  - `vault-crm-sync` — every 5 min (if `CRM_API_URL` + `CRM_API_KEY`, or `CRM_DATABASE_URL`): SDR lines → line schedules → CALL actions → matcher.
 
 ## Setup / rollout
 
@@ -73,11 +100,36 @@ npm run build && npm start
 3. Under **Numéros visibles par ce client**, check the Allo numbers that Captain Prospect is permitted to view, and click **Enregistrer les numéros**. Any unchecked number remains strictly private to Suzali Conseil.
 4. Under **Utilisateurs**, create a user login for the client team, or mint a client-scoped API key under **Clés API**.
 
-**CRM link (read-only).** Create a role on the CRM database and set `CRM_DATABASE_URL` on the worker:
+**CRM link (read-only), through the CRM's API (recommended).** In the CRM repo, mint an internal key
+(manager only, expiry required, max 90 days) and give it to the worker:
+
+```bash
+# in captainprospect-crm, with DATABASE_URL pointing at the CRM's production database
+npm run api-key:create -- --all-clients --name "call-vault" --by <manager email> --scopes calls:read --expires-days 90
+```
+
+```
+CRM_API_URL=https://app.captainprospect.fr
+CRM_API_KEY=cp_live_…
+```
+
+The worker reads `GET /api/v1/vault/sdr-numbers` and `GET /api/v1/vault/call-actions` (internal keys only,
+read-only, audited on the CRM). **The key expires** (≤ 90 days): the dashboard's "Liaison CRM" line and
+`GET /api/calls/coverage` (`crmSync`) turn to "en échec" with the reason — mint a new key and update the
+variable.
+
+**Alternative: direct database access.** Create a role on the CRM database and set `CRM_DATABASE_URL`
+on the worker instead (ignored when `CRM_API_URL` + `CRM_API_KEY` are set):
 
 ```sql
 CREATE ROLE call_vault_reader LOGIN PASSWORD '…';
-GRANT SELECT ON "User", "Action", "Contact", "Company", "Campaign", "Mission" TO call_vault_reader;
+GRANT USAGE ON SCHEMA public TO call_vault_reader;
+GRANT SELECT ("id", "alloPhoneNumber", "isActive") ON "User" TO call_vault_reader;
+GRANT SELECT ("id", "contactId", "companyId", "sdrId", "campaignId", "channel", "result", "meetingPhone", "createdAt") ON "Action" TO call_vault_reader;
+GRANT SELECT ("id", "companyId", "phone", "additionalPhones") ON "Contact" TO call_vault_reader;
+GRANT SELECT ("id", "phone", "customData") ON "Company" TO call_vault_reader;
+GRANT SELECT ("id", "missionId") ON "Campaign" TO call_vault_reader;
+GRANT SELECT ("id", "clientId") ON "Mission" TO call_vault_reader;
 ```
 
 The first CRM sync mirrors the last `CRM_ACTIONS_INITIAL_DAYS` (35) of CALL actions and

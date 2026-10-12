@@ -126,8 +126,8 @@ export default async function ClientPage({ params }: { params: Promise<{ id: str
       </table>
       <SecretForm action={createClientUser} submit="Créer l'utilisateur">
         <input type="hidden" name="clientId" value={client.id} />
-        <input name="name" placeholder="Nom" style={{ width: 160 }} />
-        <input name="email" type="email" placeholder="email" required style={{ width: 240 }} />
+        <input name="name" aria-label="Nom" placeholder="Nom" style={{ width: 160 }} />
+        <input name="email" type="email" aria-label="Email" placeholder="email" required style={{ width: 240 }} />
       </SecretForm>
 
       <h2 style={{ fontSize: 14, marginTop: 32 }}>Clés API</h2>
@@ -171,7 +171,7 @@ export default async function ClientPage({ params }: { params: Promise<{ id: str
       </table>
       <SecretForm action={createClientApiKey} submit="Créer une clé">
         <input type="hidden" name="clientId" value={client.id} />
-        <input name="name" placeholder="Nom (ex. MCP production)" style={{ width: 240 }} />
+        <input name="name" aria-label="Nom de la clé" placeholder="Nom (ex. MCP production)" style={{ width: 240 }} />
       </SecretForm>
     </Shell>
   );

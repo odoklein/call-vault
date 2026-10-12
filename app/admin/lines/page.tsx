@@ -43,7 +43,7 @@ export default async function LinesPage() {
               <td colSpan={1}>
                 <form action={updateLine} id={`f-${l.id}`}>
                   <input type="hidden" name="lineId" value={l.id} />
-                  <input name="label" defaultValue={l.label ?? ""} placeholder="ex. Équipe Orpi" style={{ width: 170 }} />
+                  <input name="label" aria-label={`Libellé de ${l.externalNumber}`} defaultValue={l.label ?? ""} placeholder="ex. Équipe Orpi" style={{ width: 170 }} />
                 </form>
               </td>
               <td>{SOURCE[l.source] ?? l.source}</td>
@@ -51,7 +51,7 @@ export default async function LinesPage() {
               <td>{fmt(l.syncCursors[0]?.lastSyncAt)}</td>
               <td>{l.clients.length ? l.clients.map((c) => c.client.name).join(", ") : <span className="muted">Suzali uniquement</span>}</td>
               <td>
-                <input form={`f-${l.id}`} type="checkbox" name="active" defaultChecked={l.isActive} />
+                <input form={`f-${l.id}`} type="checkbox" name="active" aria-label={`${l.externalNumber} actif`} defaultChecked={l.isActive} />
               </td>
               <td>
                 <button form={`f-${l.id}`} type="submit" className="ghost">
@@ -72,8 +72,8 @@ export default async function LinesPage() {
 
       <h2 style={{ fontSize: 14, marginTop: 32 }}>Ajouter un numéro</h2>
       <SecretForm action={addLine} submit="Ajouter">
-        <input name="number" placeholder="+33 6 12 34 56 78" required style={{ width: 200 }} />
-        <input name="label" placeholder="Libellé (optionnel)" style={{ width: 200 }} />
+        <input name="number" aria-label="Numéro" placeholder="+33 6 12 34 56 78" required style={{ width: 200 }} />
+        <input name="label" aria-label="Libellé" placeholder="Libellé (optionnel)" style={{ width: 200 }} />
       </SecretForm>
     </Shell>
   );

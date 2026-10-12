@@ -105,6 +105,8 @@ export interface CoverageReport {
   /** Calls on lines not mapped to any CRM user. */
   unmappedLineCalls: Omit<SdrCallCounts, "sdrUserId"> | null;
   missingTranscripts: { id: string; startedAt: string; durationSec: number; line: string | null; sdrUserId: string | null; actionId: string | null }[];
+  /** Last CRM link run (worker). ok=false with an error = linking is stale (e.g. expired CRM API key). */
+  crmSync?: { at: string; ok: boolean; source: string; error?: string } | null;
 }
 
 const zeroCalls = (): Omit<SdrCallCounts, "sdrUserId"> => ({
@@ -186,5 +188,6 @@ export async function getCoverage(from: Date, to: Date, now = new Date()): Promi
     };
   });
 
-  return buildCoverage({ from, to, now, actionCounts, callCounts, lines, missingTranscripts });
+  const status = await prisma.syncState.findUnique({ where: { key: "crm.sync.status" } });
+  return { ...buildCoverage({ from, to, now, actionCounts, callCounts, lines, missingTranscripts }), crmSync: (status?.value as CoverageReport["crmSync"]) ?? null };
 }

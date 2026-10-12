@@ -17,9 +17,9 @@ export function Shell({ user, active, children }: { user: SessionUser; active: T
       <header className="topbar">
         <strong>Suzali Conseil · Calls</strong>
         {user.role === "ADMIN" ? (
-          <nav>
+          <nav aria-label="Navigation principale">
             {ADMIN_TABS.map((t) => (
-              <Link key={t.key} href={t.href} className={t.key === active ? "active" : ""}>
+              <Link key={t.key} href={t.href} className={t.key === active ? "active" : ""} aria-current={t.key === active ? "page" : undefined}>
                 {t.label}
               </Link>
             ))}

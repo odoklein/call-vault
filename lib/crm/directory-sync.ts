@@ -1,4 +1,4 @@
-// Pulls what the vault needs from the CRM (read-only) to link calls to people:
+// Pulls what the vault needs from the CRM (read-only, via lib/crm/source.ts) to link calls to people:
 //  1. SDR -> Allo number (User.alloPhoneNumber): sets Line.crmUserId, and auto-provisions a Line
 //     for any SDR number the vault isn't syncing yet. Before this, an SDR whose number wasn't in
 //     ALLO_NUMBERS had every call silently missed.
@@ -6,10 +6,11 @@
 //     for the matcher. Incremental by a log-time watermark with an overlap, so edits made shortly
 //     after logging (contact attached, phone fixed) are picked up.
 
-import type { PrismaClient, MatchStatus } from "@prisma/client";
+import type { MatchStatus } from "@prisma/client";
 import { prisma } from "../db";
 import { phonesFromJson, toE164, toE164List } from "../phone";
-import { callActionsQuery, sdrNumbersQuery, type CrmCallActionRow, type CrmSdrNumberRow } from "./queries";
+import type { CrmCallActionRow, CrmSdrNumberRow } from "./queries";
+import type { CrmSource } from "./source";
 
 // ---------------------------------------------------------------------------------------------
 // SDR lines
@@ -52,12 +53,12 @@ export interface SdrLineSyncResult {
   conflicts: string[];
 }
 
-export async function syncSdrLines(crm: PrismaClient): Promise<SdrLineSyncResult> {
+export async function syncSdrLines(source: CrmSource): Promise<SdrLineSyncResult> {
   const result: SdrLineSyncResult = { mapped: 0, provisioned: [], deactivated: [], conflicts: [] };
   const allo = await prisma.provider.findUnique({ where: { slug: "allo" } });
   if (!allo) return result;
 
-  const rows = await crm.$queryRaw<CrmSdrNumberRow[]>(sdrNumbersQuery());
+  const rows = await source.sdrNumbers();
   const { owners, conflicts } = sdrOwnership(rows);
   result.conflicts = conflicts;
 
@@ -177,7 +178,7 @@ export interface ActionSyncResult {
   watermark: string;
 }
 
-export async function syncCrmActions(crm: PrismaClient): Promise<ActionSyncResult> {
+export async function syncCrmActions(source: CrmSource): Promise<ActionSyncResult> {
   const state = await prisma.syncState.findUnique({ where: { key: WATERMARK_KEY } });
   const stored = (state?.value as { loggedAt?: string } | null)?.loggedAt;
   const initialDays = Math.max(1, parseInt(process.env.CRM_ACTIONS_INITIAL_DAYS ?? "35", 10) || 35);
@@ -189,7 +190,7 @@ export async function syncCrmActions(crm: PrismaClient): Promise<ActionSyncResul
   const result: ActionSyncResult = { read: 0, created: 0, updated: 0, watermark: watermark.toISOString() };
 
   for (;;) {
-    const rows = await crm.$queryRaw<CrmCallActionRow[]>(callActionsQuery(sinceIso, afterId, BATCH));
+    const rows = await source.callActions(sinceIso, afterId, BATCH);
     if (rows.length === 0) break;
     result.read += rows.length;
 

@@ -57,8 +57,8 @@ export default async function ClientsPage() {
 
       <h2 style={{ fontSize: 14, marginTop: 32 }}>Nouveau client</h2>
       <SecretForm action={createClient} submit="Créer">
-        <input name="name" placeholder="Nom (ex. Captain Prospect CRM)" required style={{ width: 280 }} />
-        <input name="slug" placeholder="identifiant (optionnel)" style={{ width: 180 }} />
+        <input name="name" aria-label="Nom du client" placeholder="Nom (ex. Captain Prospect CRM)" required style={{ width: 280 }} />
+        <input name="slug" aria-label="Identifiant" placeholder="identifiant (optionnel)" style={{ width: 180 }} />
       </SecretForm>
     </Shell>
   );

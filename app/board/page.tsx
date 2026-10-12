@@ -75,15 +75,15 @@ export default async function BoardPage({ searchParams }: { searchParams: Promis
 
       <form className="inline-form" method="get">
         {sp.client && <input type="hidden" name="client" value={sp.client} />}
-        <input name="q" defaultValue={sp.q ?? ""} placeholder="Rechercher dans les transcriptions…" style={{ width: 300 }} />
-        <select name="period" defaultValue={period}>
+        <input name="q" type="search" aria-label="Rechercher dans les transcriptions" defaultValue={sp.q ?? ""} placeholder="Rechercher dans les transcriptions…" style={{ width: 300 }} />
+        <select name="period" aria-label="Période" defaultValue={period}>
           {Object.entries(PERIODS).map(([k, v]) => (
             <option key={k} value={k}>
               {v.label}
             </option>
           ))}
         </select>
-        <select name="line" defaultValue={selectedLine ?? ""}>
+        <select name="line" aria-label="Numéro" defaultValue={selectedLine ?? ""}>
           <option value="">Tous les numéros</option>
           {byLine.map((l) => (
             <option key={l.lineId} value={l.lineId}>
