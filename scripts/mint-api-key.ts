@@ -20,7 +20,7 @@ async function main() {
 
   const { fullKey, keyHash, keyPrefix } = generateApiKey();
   await prisma.apiKey.create({
-    data: { name, keyHash, keyPrefix, allowedEndpoints: ["/api/calls"] },
+    data: { name, keyHash, keyPrefix, allowedEndpoints: ["/api/calls", "/api/mcp"] },
   });
 
   console.log(`\nAPI key for "${name}" — copy it now, it will not be shown again:\n`);

@@ -108,7 +108,7 @@ export async function createClientApiKey(_prev: ActionResult, f: FormData): Prom
   const clientId = str(f, "clientId");
   const name = str(f, "name") || "Clé API";
   const { fullKey, keyHash, keyPrefix } = generateApiKey();
-  await prisma.apiKey.create({ data: { name, keyHash, keyPrefix, clientId, allowedEndpoints: ["/api/calls"] } });
+  await prisma.apiKey.create({ data: { name, keyHash, keyPrefix, clientId, allowedEndpoints: ["/api/calls", "/api/mcp"] } });
   revalidatePath(`/admin/clients/${clientId}`);
   return { ok: true, secret: fullKey, note: "Clé API — affichée une seule fois." };
 }

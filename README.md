@@ -142,6 +142,25 @@ follows on the (deliberately slow) mirror queue.
 **CRM MCP.** Nothing to configure beyond the existing `VAULT_API_URL` / `VAULT_API_KEY` — the
 new endpoints live under `/api/calls`, which the CRM's key already allows.
 
+## Call Vault MCP (standalone, not linked to the CRM)
+
+`POST https://calls.suzaliconseil.com/api/mcp` — Streamable HTTP MCP server, Bearer vault key, read-only.
+It knows nothing about the CRM: no CRM ids in or out. In ChatGPT you add **two connectors**, the CRM MCP and
+this one, and the assistant joins them on the **prospect's phone number** (E.164, any input format accepted).
+
+| Tool | Purpose |
+| --- | --- |
+| `search_calls` | Filter by `phone[]`, French full-text `q`, `from`/`to`, `direction`, `hasTranscript`; cursor pagination. |
+| `get_call` | One call: summary + full transcript (SDR / PROSPECT turns). |
+| `get_calls_for_phone` | Last 10 calls with a number, oldest first, with transcripts — "brief me on this contact". |
+| `list_lines` | The numbers this key can see. |
+
+Access is the same line grant as the rest of the vault (`lib/access.ts`): a client key sees only its granted
+numbers. Keys minted from now on (client admin page, `npm run mint-api-key`) work on both the REST API and the MCP;
+older keys restricted to `/api/calls` are rejected here — mint a new one. **No-auth variant:** `POST /api/mcp/open` serves the same tools with no key and access to every line, for ChatGPT connectors that can't send a Bearer token. Disabled (404) unless `MCP_OPEN_ACCESS=true`. Anyone with the URL can read all calls and transcripts.
+
+Code: `lib/mcp/`, `app/api/mcp/route.ts`, `app/api/mcp/open/route.ts`.
+
 ## API (Bearer vault key, `allowedEndpoints` prefix `/api/calls`)
 
 | Endpoint | Purpose |
