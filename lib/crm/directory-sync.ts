@@ -178,13 +178,17 @@ export interface ActionSyncResult {
   watermark: string;
 }
 
-export async function syncCrmActions(source: CrmSource): Promise<ActionSyncResult> {
+/**
+ * `since` re-reads from that instant regardless of the watermark (scripts/match-history.ts); the
+ * watermark itself only ever moves forward.
+ */
+export async function syncCrmActions(source: CrmSource, opts: { since?: Date } = {}): Promise<ActionSyncResult> {
   const state = await prisma.syncState.findUnique({ where: { key: WATERMARK_KEY } });
   const stored = (state?.value as { loggedAt?: string } | null)?.loggedAt;
   const initialDays = Math.max(1, parseInt(process.env.CRM_ACTIONS_INITIAL_DAYS ?? "35", 10) || 35);
   const watermark = stored ? new Date(stored) : new Date(Date.now() - initialDays * 86_400_000);
 
-  let sinceIso = new Date(watermark.getTime() - (stored ? OVERLAP_MS : 0)).toISOString();
+  let sinceIso = (opts.since ?? new Date(watermark.getTime() - (stored ? OVERLAP_MS : 0))).toISOString();
   let afterId = "";
   let newest = watermark;
   const result: ActionSyncResult = { read: 0, created: 0, updated: 0, watermark: watermark.toISOString() };

@@ -25,9 +25,13 @@ export interface MatcherRunResult {
   waitingForLine: number;
 }
 
-export async function runMatcher(now = new Date()): Promise<MatcherRunResult> {
+/**
+ * `retryWindowMs` widens how far back actions are (re)considered — scripts/match-history.ts uses it
+ * to link a month of history once; the scheduled job keeps the 72h default.
+ */
+export async function runMatcher(now = new Date(), opts: { retryWindowMs?: number } = {}): Promise<MatcherRunResult> {
   const result: MatcherRunResult = { considered: 0, matched: 0, unmatched: 0, waitingForLine: 0 };
-  const windowStart = new Date(now.getTime() - RETRY_WINDOW_MS);
+  const windowStart = new Date(now.getTime() - (opts.retryWindowMs ?? RETRY_WINDOW_MS));
 
   // Past the retry window: whatever is still waiting is final.
   await prisma.crmAction.updateMany({

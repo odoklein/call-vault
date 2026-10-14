@@ -16,7 +16,8 @@
     "backfill": "tsx scripts/backfill.ts",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "create-admin": "tsx scripts/create-admin.ts"
+    "create-admin": "tsx scripts/create-admin.ts",
+    "match-history": "tsx scripts/match-history.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.968.0",
